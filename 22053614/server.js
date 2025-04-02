@@ -5,119 +5,156 @@ const _ = require('lodash');
 const app = express();
 const PORT = 9876;
 const WINDOW_SIZE = 10;
-const TEST_SERVER_URL = 'http://20.244.56.144/evaluation-service';
+const SERVER_URL = 'http://20.244.56.144/evaluation-service';
 
-let numberWindow = [];
-let windowSum = 0;
+let numWindow = [];
+let windowTotal = 0;
+let authToken = '';
 
-const numberEndpoints = {
+const endpoints = {
     p: 'primes',
     f: 'fibo',
     e: 'even',
     r: 'rand'
 };
 
-const getMockNumbers = (type) => {
-    const mockData = {
-        p: [2, 3, 5, 7, 11, 13, 17, 19, 23, 29],
-        f: [1, 2, 3, 5, 8, 13, 21, 34, 55, 89],
-        e: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
-        r: [7, 42, 15, 33, 8, 19, 26, 51, 10, 37]
-    };
-    return mockData[type] || [];
-};
+function getFallbackData(type) {
+    if (type === 'p') return [2, 3, 5, 7, 11, 13, 17, 19, 23, 29];
+    if (type === 'f') return [1, 2, 3, 5, 8, 13, 21, 34, 55, 89];
+    if (type === 'e') return [2, 4, 6, 8, 10, 12, 14, 16, 18, 20];
+    if (type === 'r') return [7, 42, 15, 33, 8, 19, 26, 51, 10, 37];
+    return [];
+}
 
-const fetchNumbers = async (numberType) => {
-    const endpoint = numberEndpoints[numberType];
+async function getAuthToken() {
+    try {
+        const resp = await axios.post(`${SERVER_URL}/auth`, {
+            email: "ramkrishna@abc.edu",
+            name: "ram krishna",
+            rollNo: "aalbb",
+            accessCode: "xgAsNC",
+            clientID: "d9cbb699-6a27-44a5-8d59-8b1befa816da",
+            clientSecret: "tVJaaaRBSeXcRXeM"
+        });
+        
+        if (resp.data && resp.data.access_token) {
+            console.log("Authentication successful");
+            return resp.data.access_token;
+        } else {
+            console.log("Invalid auth response");
+            return '';
+        }
+    } catch (err) {
+        console.log(`Auth failed: ${err.message}`);
+        return '';
+    }
+}
+
+async function getNumbers(type) {
+    const endpoint = endpoints[type];
     if (!endpoint) return [];
 
+    if (!authToken) {
+        authToken = await getAuthToken();
+        if (!authToken) {
+            console.log("Using fallback data due to auth failure");
+            return getFallbackData(type);
+        }
+    }
+
     try {
-        console.log(`Fetching from ${TEST_SERVER_URL}/${endpoint}`);
-        const response = await axios.get(`${TEST_SERVER_URL}/${endpoint}`, {
-            timeout: 2000 
-        });
-        console.log('Response status:', response.status);
-        
-       
-        if (response.data && Array.isArray(response.data.numbers)) {
-            console.log('Numbers received:', response.data.numbers);
-            return response.data.numbers;
-        } else {
-            console.log('Invalid response format, using mock data');
-            return getMockNumbers(numberType);
-        }
-    } catch (error) {
-        console.error(`Error fetching ${numberType} numbers:`, error.message);
-        console.log('Falling back to mock data');
-        return getMockNumbers(numberType);
-    }
-};
-
-const updateNumberWindow = (newNumbers) => {
-    if (!newNumbers || newNumbers.length === 0) {
-        return [...numberWindow]; 
-    }
-
-    const uniqueNewNumbers = _.uniq(newNumbers);
-    const previousWindow = [...numberWindow];
-
-    uniqueNewNumbers.forEach(num => {
-        if (!numberWindow.includes(num)) {
-            if (numberWindow.length >= WINDOW_SIZE) {
-                const removedNum = numberWindow.shift();
-                windowSum -= removedNum;
+        let resp = await axios.get(`${SERVER_URL}/${endpoint}`, {
+            timeout: 2000,
+            headers: {
+                'Authorization': `Bearer ${authToken}`
             }
-            numberWindow.push(num);
-            windowSum += num;
+        });
+        
+        if (resp.data && resp.data.numbers) {
+            return resp.data.numbers;
+        } else {
+            console.log("Invalid response format, using fallback");
+            return getFallbackData(type);
         }
-    });
+    } catch (err) {
+        console.log(`Failed to get ${type} numbers: ${err.message}`);
+        
+        // If token expired, try to get a new one
+        if (err.response && err.response.status === 401) {
+            console.log("Token expired, refreshing");
+            authToken = await getAuthToken();
+            if (authToken) {
+                return getNumbers(type); // Retry with new token
+            }
+        }
+        
+        return getFallbackData(type);
+    }
+}
 
-    return previousWindow;
-};
+function updateWindow(newNums) {
+    let oldWindow = [...numWindow];
+    
+    if (!newNums || newNums.length === 0) {
+        return oldWindow;
+    }
 
-app.get('/numbers/:numberType', async (req, res) => {
-    const numberType = req.params.numberType;
+    let uniqueNums = [];
+    for (let num of newNums) {
+        if (!uniqueNums.includes(num)) {
+            uniqueNums.push(num);
+        }
+    }
 
-    if (!Object.keys(numberEndpoints).includes(numberType)) {
+    for (let num of uniqueNums) {
+        if (!numWindow.includes(num)) {
+            if (numWindow.length >= WINDOW_SIZE) {
+                let removed = numWindow.shift();
+                windowTotal -= removed;
+            }
+            numWindow.push(num);
+            windowTotal += num;
+        }
+    }
+
+    return oldWindow;
+}
+
+app.get('/numbers/:type', async (req, res) => {
+    let type = req.params.type;
+    
+    if (!endpoints[type]) {
         return res.status(400).json({ error: 'Invalid number type specified' });
     }
 
     try {
-        console.log(`Processing request for number type: ${numberType}`);
-        const numbers = await fetchNumbers(numberType);
-        const prevWindow = updateNumberWindow(numbers);
+        let numbers = await getNumbers(type);
+        let prevState = updateWindow(numbers);
         
-        
-        const avg = numberWindow.length > 0 
-            ? _.round(windowSum / numberWindow.length, 1) 
-            : 0;
+        let average = 0;
+        if (numWindow.length > 0) {
+            average = Math.round((windowTotal / numWindow.length) * 10) / 10;
+        }
 
-        const response = {
-            windowPrevState: prevWindow,
-            windowCurrState: [...numberWindow],
+        res.json({
+            windowPrevState: prevState,
+            windowCurrState: [...numWindow],
             numbers: numbers,
-            avg: avg
-        };
-        
-        console.log('Sending response:', response);
-        res.json(response);
-    } catch (err) {
-        console.error('Error processing request:', err);
-        res.status(500).json({ error: 'Internal server error' });
+            avg: average
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Server error occurred' });
     }
 });
-
 
 app.use((req, res) => {
     res.status(404).json({ error: 'Endpoint not found' });
 });
 
-
 app.use((err, req, res, next) => {
-    console.error('Unhandled error:', err.stack);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Server error' });
 });
 
 app.listen(PORT, () => {
-    console.log(`Microservice operational on port ${PORT}`);
+    console.log(`Service running on port ${PORT}`);
 });
